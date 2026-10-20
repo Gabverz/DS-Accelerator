@@ -1,0 +1,23 @@
+# Ambiente virtual e caches
+.venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.mypy_cache/
+.ruff_cache/
+
+# Dados (confidenciais/volumosos): ficam apenas localmente
+dados/*.parquet
+dados_processados/
+*.parquet
+*.csv
+
+# Artefatos gerados
+modelos/
+mlruns/
+figuras/*.tmp
+
+# Sistema e IDE
+.DS_Store
+.vscode/
+.idea/
