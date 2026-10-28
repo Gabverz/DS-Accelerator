@@ -140,3 +140,114 @@ def auditar_categoricas(
         linhas_variantes, columns=["coluna", "valor_normalizado", "variantes", "n_linhas"]
     )
     return resumo, frequencias, variantes
+
+def _texto_para_numero(
+    serie: pd.Series, decimal: str = ".", milhar: str | None = None
+) -> pd.Series:
+    """Converte uma série de texto numérico em float.
+
+    Remove tudo que não seja dígito, sinal de menos, vírgula ou ponto (o que
+    elimina símbolos como "R$", espaços e textos como "não informado"), tira o
+    separador de milhar, troca o separador decimal por ponto e converte.
+    Valores que não puderem ser convertidos viram NaN.
+
+    Args:
+        serie: Série de texto, ex.: "R$ 1.234,56".
+        decimal: Separador decimal usado no texto original.
+        milhar: Separador de milhar usado no texto original, ou None se não houver.
+
+    Returns:
+        Série float64. Ex.: "R$ 1.234,56" com decimal="," e milhar="." -> 1234.56.
+    """
+    s = serie.astype("string")
+    s = s.str.replace(r"[^\d\-,.]", "", regex=True)
+    if milhar:
+        s = s.str.replace(milhar, "", regex=False)
+    if decimal != ".":
+        s = s.str.replace(decimal, ".", regex=False)
+    return pd.to_numeric(s, errors="coerce").astype("float64")
+
+
+def converter_tipos(
+    df: pd.DataFrame,
+    datas: dict[str, str | list[str] | None] | None = None,
+    numericas_texto: dict[str, dict] | None = None,
+    inteiros: list[str] | tuple = (),
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Converte colunas para os tipos corretos e relata o que foi perdido.
+
+    Não altera o DataFrame original. Valores que não puderem ser convertidos
+    viram nulo, e o relatório informa quantos foram e exemplos deles, para
+    que a conversão nunca descarte dados silenciosamente.
+
+    Args:
+        df: DataFrame de entrada.
+        datas: Mapa coluna -> formato de data. O formato pode ser um texto
+            (ex.: "%Y-%m-%d"), uma lista de textos tentados em ordem (cada
+            formato preenche só o que os anteriores não converteram) ou None,
+            caso em que o pandas tenta inferir.
+        numericas_texto: Mapa coluna -> opções de _texto_para_numero (ex.:
+            {"renda_anual": {"decimal": ",", "milhar": "."}}).
+        inteiros: Colunas numéricas a converter para inteiro com suporte a nulos
+            (Int64). Levanta ValueError se houver valores não inteiros.
+
+    Returns:
+        Tupla (df_convertido, relatorio). O relatório tem uma linha por coluna
+        convertida, com dtype_antes, dtype_depois, nulos_antes, nulos_depois,
+        falhas (valores não nulos que viraram nulo) e exemplos_falha.
+
+    Raises:
+        KeyError: Se alguma coluna pedida não existir no DataFrame.
+        ValueError: Se uma coluna de `inteiros` tiver valores fracionários.
+
+    Example:
+        >>> cadastral_t, rel = converter_tipos(
+        ...     cadastral,
+        ...     datas={"data_nascimento": ["%Y-%m-%d", "%d/%m/%Y"]},
+        ...     numericas_texto={"renda_anual": {"decimal": ",", "milhar": "."}},
+        ...     inteiros=["qtd_membros_familia"],
+        ... )
+    """
+    pedidas = [*(datas or {}), *(numericas_texto or {}), *inteiros]
+    ausentes = [c for c in pedidas if c not in df.columns]
+    if ausentes:
+        raise KeyError(f"Colunas ausentes no DataFrame: {ausentes}")
+
+    out = df.copy()
+    linhas = []
+
+    def registrar(col: str, depois: pd.Series) -> None:
+        """Compara a coluna original com a convertida e guarda uma linha no relatório."""
+        antes = df[col]
+        virou_nulo = depois.isna() & antes.notna()
+        linhas.append({
+            "coluna": col,
+            "dtype_antes": str(antes.dtype),
+            "dtype_depois": str(depois.dtype),
+            "nulos_antes": int(antes.isna().sum()),
+            "nulos_depois": int(depois.isna().sum()),
+            "falhas": int(virou_nulo.sum()),
+            "exemplos_falha": list(antes[virou_nulo].unique()[:5]),
+        })
+
+    for col, formato in (datas or {}).items():
+        formatos = [formato] if formato is None or isinstance(formato, str) else list(formato)
+        convertida = pd.to_datetime(df[col], format=formatos[0], errors="coerce")
+        for f in formatos[1:]:
+            convertida = convertida.fillna(pd.to_datetime(df[col], format=f, errors="coerce"))
+        out[col] = convertida
+        registrar(col, out[col])
+
+    for col, opcoes in (numericas_texto or {}).items():
+        out[col] = _texto_para_numero(df[col], **opcoes)
+        registrar(col, out[col])
+
+    for col in inteiros:
+        num = pd.to_numeric(df[col], errors="coerce")
+        n_fracionarios = int((num.dropna() % 1 != 0).sum())
+        if n_fracionarios:
+            raise ValueError(f"{col}: {n_fracionarios} valores não inteiros")
+        out[col] = num.astype("Int64")
+        registrar(col, out[col])
+
+    return out, pd.DataFrame(linhas)
