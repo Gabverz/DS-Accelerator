@@ -251,3 +251,53 @@ def converter_tipos(
         registrar(col, out[col])
 
     return out, pd.DataFrame(linhas)
+
+def padronizar_categoricas(
+    df: pd.DataFrame,
+    colunas: list[str],
+    placeholders: frozenset | set = PLACEHOLDERS_PADRAO,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Padroniza colunas categóricas e relata o efeito.
+
+    Aplica _normalizar a cada valor (minúsculas, sem acento, sem espaços
+    sobrando) e converte placeholders de ausência (ex.: "não informado") em
+    nulo. Não altera o DataFrame original.
+
+    Args:
+        df: DataFrame de entrada.
+        colunas: Colunas de texto a padronizar.
+        placeholders: Valores que representam ausência disfarçada; a
+            comparação é feita após a normalização.
+
+    Returns:
+        Tupla (df_padronizado, relatorio). O relatório tem uma linha por
+        coluna, com n_distintos_antes, n_distintos_depois, nulos_antes e
+        nulos_depois.
+
+    Raises:
+        KeyError: Se alguma coluna não existir no DataFrame.
+    """
+    ausentes = [c for c in colunas if c not in df.columns]
+    if ausentes:
+        raise KeyError(f"Colunas ausentes no DataFrame: {ausentes}")
+
+    placeholders_norm = {_normalizar(p) for p in placeholders}
+    out = df.copy()
+    linhas = []
+
+    for col in colunas:
+        antes = df[col]
+        # Normaliza só os valores não nulos; nulos originais continuam nulos.
+        normal = antes.map(lambda v: _normalizar(str(v)) if pd.notna(v) else v)
+        # Placeholders (já normalizados) viram nulo.
+        normal = normal.where(~normal.isin(placeholders_norm), other=pd.NA)
+        out[col] = normal
+        linhas.append({
+            "coluna": col,
+            "n_distintos_antes": int(antes.nunique()),
+            "n_distintos_depois": int(out[col].nunique()),
+            "nulos_antes": int(antes.isna().sum()),
+            "nulos_depois": int(out[col].isna().sum()),
+        })
+
+    return out, pd.DataFrame(linhas)
