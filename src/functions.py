@@ -252,6 +252,28 @@ def converter_tipos(
 
     return out, pd.DataFrame(linhas)
 
+def _normalizar_serie(serie: pd.Series) -> pd.Series:
+    """Normaliza uma série de texto de forma vetorizada.
+
+    Remove acentos, converte para minúsculas, tira espaços nas pontas e
+    colapsa espaços repetidos. Nulos continuam nulos.
+
+    Args:
+        serie: Série de texto.
+
+    Returns:
+        Série de dtype string. Ex.: "  Não  Informado " -> "nao informado".
+    """
+    return (
+        serie.astype("string")
+        .str.normalize("NFKD")
+        .str.encode("ascii", errors="ignore")
+        .str.decode("ascii")
+        .str.lower()
+        .str.strip()
+        .str.replace(r"\s+", " ", regex=True)
+    )
+
 def padronizar_categoricas(
     df: pd.DataFrame,
     colunas: list[str],
@@ -287,10 +309,9 @@ def padronizar_categoricas(
 
     for col in colunas:
         antes = df[col]
-        # Normaliza só os valores não nulos; nulos originais continuam nulos.
-        normal = antes.map(lambda v: _normalizar(str(v)) if pd.notna(v) else v)
-        # Placeholders (já normalizados) viram nulo.
-        normal = normal.where(~normal.isin(placeholders_norm), other=pd.NA)
+        # Normaliza só os valores não nulos (o dtype string preserva os nulos).
+        normal = _normalizar_serie(antes)
+        normal = normal.mask(normal.isin(placeholders_norm))
         out[col] = normal
         linhas.append({
             "coluna": col,
