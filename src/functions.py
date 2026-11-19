@@ -115,8 +115,7 @@ def auditar_categoricas(
         freq["pct"] = freq["n"] / n_total
         nao_nulo = freq["valor"].notna()
         freq["rara"] = nao_nulo & (freq["pct"] < limite_rara)
-        freq["placeholder"] = freq["valor"].map(
-            lambda v: pd.notna(v) and _normalizar(str(v)) in placeholders_norm
+        freq["placeholder"] = _normalizar_serie(freq["valor"]).isin(placeholders_norm
         )
         freq.insert(0, "coluna", col)
         tabelas_freq.append(freq)
