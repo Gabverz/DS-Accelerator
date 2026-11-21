@@ -56,3 +56,6 @@ typing_extensions==4.16.0
 tzdata==2026.5
 wcwidth==0.9.3
 wrapt==2.5.1
+scikit-learn==1.9.1
+lightgbm==4.7.0
+xgboost==3.4.1
