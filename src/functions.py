@@ -4,6 +4,9 @@ import unicodedata
 
 import pandas as pd
 from pandas.api.types import is_object_dtype, is_string_dtype
+import numpy as np
+from sklearn.ensemble import HistGradientBoostingClassifier
+from sklearn.metrics import roc_auc_score, roc_curve
 
 PLACEHOLDERS_PADRAO = frozenset({
     "", "?", "-", "n/a", "na", "nan", "none", "null", "xna", "unknown",
@@ -321,3 +324,128 @@ def padronizar_categoricas(
         })
 
     return out, pd.DataFrame(linhas)
+
+"""Funções para etapa de transformação e modelagem do projeto de previsão de inadimplência."""
+
+PARAMS_BASELINE = dict(
+    learning_rate=0.05, max_iter=200, max_depth=4, min_samples_leaf=200,
+    l2_regularization=1.0, categorical_features="from_dtype",
+    early_stopping=False, random_state=42,
+)
+
+
+def selecionar_features(df, excluir):
+    """Devolve as colunas de df que não estão em `excluir`, validando que todas as exclusões existem."""
+    ausentes = set(excluir) - set(df.columns)
+    assert not ausentes, f"Colunas de exclusão inexistentes: {ausentes}"
+    return [c for c in df.columns if c not in excluir]
+
+
+def preparar_X(df, features):
+    """Seleciona features e converte inteiros anuláveis (Int*) para float64 (NA -> NaN)."""
+    X = df[features].copy()
+    cols_int = X.select_dtypes(include=["Int8", "Int16", "Int32", "Int64"]).columns
+    X[cols_int] = X[cols_int].astype("float64")
+    return X
+
+
+def ks_stat(y, p):
+    """KS: maior distância entre as curvas acumuladas de maus (tpr) e bons (fpr)."""
+    fpr, tpr, _ = roc_curve(y, p)
+    return float(np.max(tpr - fpr))
+
+
+def metricas(y, p):
+    """AUC e KS; devolve (NaN, NaN) se o recorte tiver uma só classe."""
+    y = np.asarray(y)
+    if np.unique(y).size < 2:
+        return np.nan, np.nan
+    return float(roc_auc_score(y, p)), ks_stat(y, p)
+
+
+def features_sem_variacao(X):
+    """Colunas com menos de 2 valores distintos não nulos (quebram o binning do HistGradientBoosting)."""
+    n_distintos = X.nunique(dropna=True)
+    return n_distintos.index[n_distintos < 2].tolist()
+
+
+def treinar_modelo(df_treino, features, col_target, params=PARAMS_BASELINE):
+    """Treina o HistGradientBoosting removendo features constantes/vazias.
+
+    Devolve (modelo, features_usadas, features_removidas) para rastreabilidade.
+    """
+    X = preparar_X(df_treino, features)
+    removidas = features_sem_variacao(X)
+    usadas = [c for c in features if c not in removidas]
+    modelo = HistGradientBoostingClassifier(**params)
+    modelo.fit(X[usadas], df_treino[col_target].astype("int8"))
+    return modelo, usadas, removidas
+
+
+def dividir_oot(df, col_data, prop_treino, embargo_dias):
+    """Split temporal: teste = decisões após o quantil `prop_treino`;
+    treino = decisões até (corte - embargo_dias). Devolve (treino, teste, data_corte)."""
+    data_corte = df[col_data].quantile(prop_treino)
+    limite_treino = data_corte - pd.Timedelta(days=embargo_dias)
+    treino = df.loc[df[col_data] <= limite_treino]
+    teste = df.loc[df[col_data] > data_corte]
+    return treino, teste, data_corte
+
+
+def avaliar_oot(treinos, teste, features, col_target, col_cliente, params=PARAMS_BASELINE):
+    """Treina um modelo por cenário (dict nome -> treino) e avalia no teste idêntico.
+
+    Recortes: completo, novos (cliente fora do treino) e recorrentes (cliente no treino),
+    além do AUC/KS in-sample para medir overfitting.
+    """
+    y = teste[col_target].astype("int8").to_numpy()
+    linhas = []
+    for nome, tr in treinos.items():
+        modelo, usadas, _ = treinar_modelo(tr, features, col_target, params)
+        p = modelo.predict_proba(preparar_X(teste, usadas))[:, 1]
+
+        recorrente = teste[col_cliente].isin(tr[col_cliente].unique()).to_numpy()
+        recortes = {"completo": np.ones(len(teste), dtype=bool),
+                    "novos": ~recorrente, "recorrentes": recorrente}
+        for rec, m in recortes.items():
+            auc, ks = metricas(y[m], p[m])
+            linhas.append({"cenario": nome, "recorte": rec, "n": int(m.sum()),
+                           "taxa_maus": float(y[m].mean()), "auc": auc, "ks": ks})
+
+        y_tr = tr[col_target].astype("int8").to_numpy()
+        auc_tr, ks_tr = metricas(y_tr, modelo.predict_proba(preparar_X(tr, usadas))[:, 1])
+        linhas.append({"cenario": nome, "recorte": "treino (in-sample)", "n": len(tr),
+                       "taxa_maus": float(y_tr.mean()), "auc": auc_tr, "ks": ks_tr})
+    return pd.DataFrame(linhas)
+
+
+def walk_forward(df, features, col_data, col_cliente, col_target,
+                 n_folds, gap_dias, min_maus_treino, min_maus_val, params=PARAMS_BASELINE):
+    """Walk-forward expansivo com gap e separação por cliente.
+
+    Folds com poucos maus são registrados como ignorados (com motivo), não descartados.
+    """
+    limites = df[col_data].quantile(np.linspace(0, 1, n_folds + 2)).to_numpy()
+    registros = []
+    for k in range(1, n_folds + 1):
+        ini, fim = pd.Timestamp(limites[k]), pd.Timestamp(limites[k + 1])
+        val = df.loc[(df[col_data] > ini) & (df[col_data] <= fim)]
+        tr = df.loc[df[col_data] <= ini - pd.Timedelta(days=gap_dias)]
+        tr = tr.loc[~tr[col_cliente].isin(val[col_cliente].unique())]
+        assert set(tr[col_cliente]).isdisjoint(set(val[col_cliente]))
+
+        maus_tr = int(tr[col_target].astype("float").sum())
+        maus_val = int(val[col_target].astype("float").sum())
+        reg = {"fold": k, "val_inicio": ini.date(), "val_fim": fim.date(),
+               "n_treino": len(tr), "maus_treino": maus_tr,
+               "n_val": len(val), "maus_val": maus_val,
+               "auc": np.nan, "ks": np.nan, "features_removidas": "", "status": "ok"}
+        if maus_tr < min_maus_treino or maus_val < min_maus_val:
+            reg["status"] = "ignorado: maus insuficientes"
+        else:
+            modelo, usadas, removidas = treinar_modelo(tr, features, col_target, params)
+            pv = modelo.predict_proba(preparar_X(val, usadas))[:, 1]
+            reg["auc"], reg["ks"] = metricas(val[col_target].astype("int8"), pv)
+            reg["features_removidas"] = ", ".join(removidas)
+        registros.append(reg)
+    return pd.DataFrame(registros)
