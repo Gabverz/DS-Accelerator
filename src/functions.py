@@ -475,3 +475,59 @@ def criar_features_grupo_a(df, col_ref="data_ref", col_nasc="data_nascimento"):
     out["razao_parcela_renda"] = razao(out["valor_parcela"], out["renda_anual"])
 
     return out
+
+def criar_features_grupo_a(df, col_ref="data_ref", col_nasc="data_nascimento",
+                           idade_min=18, idade_max=100):
+    """
+    Grupo A: features sem histórico (contrato atual + cadastro).
+
+    Tratamentos aplicados (colunas originais NÃO são alteradas):
+    - idade_anos: (data_ref - data_nascimento) / 365,25; fora de [idade_min, idade_max] vira NaN.
+    - valor_credito, valor_parcela, valor_bem, renda_anual <= 0 viram NaN no cálculo das razões.
+    - flag_*: apenas diagnóstico (na submissão são ~0), NÃO entram em FEATURES.
+    Retorna uma cópia de df com as colunas novas.
+    """
+    import pandas as pd
+
+    out = df.copy()
+
+    nasc = pd.to_datetime(out[col_nasc], errors="coerce")
+    idade = (out[col_ref] - nasc).dt.days / 365.25
+    inconsistente = idade.notna() & ((idade < idade_min) | (idade > idade_max))
+    out["flag_idade_inconsistente"] = inconsistente.astype("int8")
+    out["idade_anos"] = idade.where(~inconsistente)
+
+    out["flag_credito_zero"] = (out["valor_credito"] <= 0).astype("int8")
+    out["flag_parcela_zero"] = (out["valor_parcela"] <= 0).astype("int8")
+
+    credito = out["valor_credito"].where(out["valor_credito"] > 0)
+    parcela = out["valor_parcela"].where(out["valor_parcela"] > 0)
+    bem = out["valor_bem"].where(out["valor_bem"] > 0)
+    renda = out["renda_anual"].where(out["renda_anual"] > 0)
+
+    # NaN se propaga na divisão; não há denominador zero, logo não há infinitos
+    out["razao_credito_parcela"] = credito / parcela
+    out["razao_credito_bem"] = credito / bem
+    out["razao_credito_renda"] = credito / renda
+    out["razao_parcela_renda"] = parcela / renda
+    return out
+
+
+def calcular_bordas_quantis(serie_treino, n_faixas=10):
+    """
+    Bordas por quantis calculadas SOMENTE no treino (sem usar o target).
+    Faixas extremas abertas (-inf, +inf), para acomodar valores fora do suporte
+    do treino na submissão. Quantis repetidos são colapsados.
+    """
+    import numpy as np
+
+    probs = np.linspace(0, 1, n_faixas + 1)[1:-1]
+    internas = np.unique(serie_treino.dropna().quantile(probs).to_numpy())
+    return np.concatenate(([-np.inf], internas, [np.inf]))
+
+
+def aplicar_faixas(serie, bordas):
+    """Código ordinal da faixa (0..k-1) como float32; NaN permanece NaN."""
+    import pandas as pd
+
+    return pd.cut(serie, bins=bordas, labels=False, include_lowest=True).astype("float32")
