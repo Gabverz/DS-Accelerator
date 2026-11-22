@@ -449,3 +449,29 @@ def walk_forward(df, features, col_data, col_cliente, col_target,
             reg["features_removidas"] = ", ".join(removidas)
         registros.append(reg)
     return pd.DataFrame(registros)
+
+def criar_features_grupo_a(df, col_ref="data_ref", col_nasc="data_nascimento"):
+    """
+    Grupo A: features sem histórico, calculadas só com colunas do contrato atual e do cadastral.
+
+    - idade_anos: (data_ref - data_nascimento) em anos; nula se qualquer data for nula.
+    - razao_*: divisão protegida; resultado NaN quando o denominador é nulo ou <= 0.
+    Retorna uma cópia de df com as colunas novas (não altera o original).
+    """
+  
+    out = df.copy()
+
+    # Idade em anos na data de referência (data_nascimento pode estar como texto)
+    nasc = pd.to_datetime(out[col_nasc], errors="coerce")
+    out["idade_anos"] = (out[col_ref] - nasc).dt.days / 365.25
+
+    def razao(num, den):
+        den_ok = den.notna() & (den > 0)
+        return np.where(den_ok, num / den.where(den_ok), np.nan)
+
+    out["razao_credito_parcela"] = razao(out["valor_credito"], out["valor_parcela"])
+    out["razao_credito_bem"] = razao(out["valor_credito"], out["valor_bem"])
+    out["razao_credito_renda"] = razao(out["valor_credito"], out["renda_anual"])
+    out["razao_parcela_renda"] = razao(out["valor_parcela"], out["renda_anual"])
+
+    return out
