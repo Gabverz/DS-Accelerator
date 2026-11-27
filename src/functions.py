@@ -7,8 +7,6 @@ from pandas.api.types import is_object_dtype, is_string_dtype
 import numpy as np
 from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.metrics import roc_auc_score, roc_curve
-from matplotlib.ticker import FuncFormatter, PercentFormatter
-
 
 PLACEHOLDERS_PADRAO = frozenset({
     "", "?", "-", "n/a", "na", "nan", "none", "null", "xna", "unknown",
@@ -507,3 +505,24 @@ def aplicar_faixas(serie, bordas):
     import pandas as pd
 
     return pd.cut(serie, bins=bordas, labels=False, include_lowest=True).astype("float32")
+
+def calcular_auc_mensal(df_scores, nome_particao):
+    """Calcula AUC e contagens por mês; AUC fica NaN se houver uma só classe."""
+    registros = []
+
+    for mes, grupo in df_scores.groupby("mes", sort=True, observed=True):
+        y_mes = grupo["target"].astype("int8").to_numpy()
+        score_mes = grupo["score_modelo"].to_numpy()
+
+        auc_mes, _ = fn.metricas(y_mes, score_mes)
+
+        registros.append({
+            "particao": nome_particao,
+            "mes": str(mes),
+            "n": len(grupo),
+            "maus": int(y_mes.sum()),
+            "bons": int(len(y_mes) - y_mes.sum()),
+            "auc": auc_mes,
+        })
+
+    return pd.DataFrame(registros)
